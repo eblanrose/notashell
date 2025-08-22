@@ -378,23 +378,15 @@ fn main() {
         let readline = rl.readline(&prompt_str);
         let mut input = match readline {
             Ok(line) => line.trim().to_string(),
-            Err(ReadlineError::Interrupted) => {
-                continue;
-            }
-            Err(ReadlineError::Eof) => {
-                break;
-            }
+            Err(ReadlineError::Interrupted) => continue,
+            Err(ReadlineError::Eof) => break,
             Err(e) => {
                 eprintln!("Error reading line: {}", e);
                 break;
             }
         };
 
-        if input.is_empty() {
-            continue;
-        }
-
-        if input.starts_with('#') || input.is_empty() {
+        if input.is_empty() || input.starts_with('#') {
             continue;
         }
 
@@ -430,6 +422,14 @@ fn main() {
             let cmd_name = &cmd_parts[0];
             let mut args: Vec<String> = cmd_parts[1..].to_vec();
 
+            // разворачиваем '~' в домашнюю директорию
+            for arg in &mut args {
+                if arg.starts_with("~") {
+                    *arg = arg.replacen("~", home.to_str().unwrap(), 1);
+                }
+            }
+
+            // обрабатываем glob '*'
             let mut expanded_args = Vec::new();
             for arg in &args {
                 if arg.contains('*') {
@@ -456,9 +456,7 @@ fn main() {
 
             let child = command.spawn();
             match child {
-                Ok(c) => {
-                    previous_process = Some(c);
-                }
+                Ok(c) => previous_process = Some(c),
                 Err(e) => {
                     eprintln!("anssh: {}", e);
                     previous_process = None;
@@ -471,9 +469,7 @@ fn main() {
             while !term.load(Ordering::Relaxed) {
                 match last.try_wait() {
                     Ok(Some(_)) => break,
-                    Ok(None) => {
-                        thread::sleep(std::time::Duration::from_millis(100));
-                    }
+                    Ok(None) => thread::sleep(std::time::Duration::from_millis(100)),
                     Err(e) => {
                         eprintln!("Error waiting for process: {}", e);
                         break;
