@@ -394,6 +394,10 @@ fn main() {
             continue;
         }
 
+        if input.starts_with('#') || input.is_empty() {
+            continue;
+        }
+
         rl.add_history_entry(input.clone()).expect("Failed to add history entry");
 
         if input == "exit" {
@@ -419,7 +423,7 @@ fn main() {
         let mut previous_process: Option<Child> = None;
 
         for (i, cmd) in commands.iter().enumerate() {
-            let cmd_parts: Vec<String> = cmd.split_whitespace().map(|s| s.to_string()).collect();
+            let cmd_parts: Vec<String> = shell_words::split(cmd).unwrap_or_default();
             if cmd_parts.is_empty() {
                 continue;
             }
