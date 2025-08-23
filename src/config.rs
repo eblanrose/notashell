@@ -1,7 +1,7 @@
+use owo_colors::OwoColorize;
 use std::fs;
 use std::path::Path;
 use std::sync::Arc;
-use owo_colors::OwoColorize;
 
 // ------------------- Highlight args -------------------
 pub(crate) fn load_highlight_rules(path: &Path) -> Vec<(glob::Pattern, Arc<dyn Fn(&str) -> String + Send + Sync>)> {

@@ -1,8 +1,8 @@
 mod helper;
 mod config;
+mod executor;
 
 use dirs::home_dir;
-use glob::glob;
 use rustyline::error::ReadlineError;
 use rustyline::{
     Editor, Result as RustyResult,
@@ -10,10 +10,9 @@ use rustyline::{
 use signal_hook::consts::SIGINT;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::{fs, thread};
+use std::fs;
 
 // ------------------- Main -------------------
 fn main() {
@@ -29,28 +28,54 @@ fn main() {
     let mut env_vars: HashMap<String, String> = std::env::vars().collect();
     let mut aliases: HashMap<String, String> = HashMap::new();
 
-    if let Ok(contents) = fs::read_to_string(&rc_path) {
+    if let Ok(contents) = fs::read_to_string(rc_path) {
         for line in contents.lines() {
             let line = line.trim();
             if line.is_empty() || line.starts_with('#') {
                 continue;
             }
-            if let Some((key, value)) = line.split_once('=') {
+
+            let line = line.strip_prefix("export ").unwrap_or(line).trim();
+
+            if let Some(eq_pos) = line.find('=') {
+                let (key, value) = line.split_at(eq_pos);
                 let key = key.trim();
-                let value = value.trim();
+                let mut value = value[1..].trim();
+
+                if (value.starts_with('"') && value.ends_with('"'))
+                    || (value.starts_with('\'') && value.ends_with('\''))
+                {
+                    value = &value[1..value.len() - 1];
+                }
+
+                let mut expanded_value = String::new();
+                let mut chars = value.chars().peekable();
+                while let Some(c) = chars.next() {
+                    if c == '$' {
+                        let mut var_name = String::new();
+                        while let Some(&ch) = chars.peek() {
+                            if ch.is_alphanumeric() || ch == '_' {
+                                var_name.push(ch);
+                                chars.next();
+                            } else {
+                                break;
+                            }
+                        }
+                        if let Some(val) = env_vars.get(&var_name) {
+                            expanded_value.push_str(val);
+                        }
+                    } else {
+                        expanded_value.push(c);
+                    }
+                }
+
                 if key.starts_with("alias ") {
                     if let Some(alias_name) = key.strip_prefix("alias ") {
-                        let mut val = value.to_string();
-                        if (val.starts_with('"') && val.ends_with('"'))
-                            || (val.starts_with('\'') && val.ends_with('\''))
-                        {
-                            val = val[1..val.len()-1].to_string();
-                        }
-                        aliases.insert(alias_name.to_string(), val);
+                        aliases.insert(alias_name.to_string(), expanded_value);
                     }
                 } else {
-                    env_vars.insert(key.to_string(), value.to_string());
-                    unsafe { std::env::set_var(key, value); }
+                    env_vars.insert(key.to_string(), expanded_value.clone());
+                    unsafe { std::env::set_var(key, expanded_value); }
                 }
             }
         }
@@ -64,7 +89,7 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     if args.len() >= 3 && args[1] == "-c" {
         let command_line = args[2..].join(" ");
-        execute_command_line(&command_line, &home, &aliases, &env_vars);
+        executor::execute_command_line(&command_line, &home, &aliases, &env_vars);
         return;
     }
 
@@ -99,8 +124,15 @@ fn main() {
 
         rl.add_history_entry(input.clone()).expect("Failed to add history entry");
 
-        if input == "exit" {
-            break;
+
+        if input.starts_with("exit") {
+            let parts: Vec<&str> = input.split_whitespace().collect();
+            let code = if parts.len() > 1 {
+                parts[1].parse::<i32>().unwrap_or(0)
+            } else {
+                0
+            };
+            std::process::exit(code);
         }
 
         for (k, v) in &env_vars {
@@ -117,105 +149,17 @@ fn main() {
             }
         }
 
-        execute_command_line(&input, &home, &aliases, &env_vars);
+        let first_word = input.split_whitespace().next().unwrap_or("");
+        if first_word.ends_with(".anssh") && Path::new(first_word).is_file() {
+            let mut parts = input.split_whitespace();
+            let script_path = parts.next().unwrap();
+            let args: Vec<String> = parts.map(|s| s.to_string()).collect();
+            executor::run_script(Path::new(script_path), &home, &aliases, &env_vars, &args);
+            continue;
+        }
+
+        executor::execute_command_line(&input, &home, &aliases, &env_vars);
     }
 
     let _ = rl.save_history(&history_path);
-}
-fn expand_subshells(arg: &str, aliases: &HashMap<String,String>, env_vars: &HashMap<String,String>) -> String {
-    let mut result = String::new();
-    let mut chars = arg.chars().peekable();
-
-    while let Some(c) = chars.next() {
-        if c == '$' && chars.peek() == Some(&'(') {
-            chars.next();
-            let mut depth = 1;
-            let mut cmd = String::new();
-
-            while let Some(&ch) = chars.peek() {
-                chars.next();
-                if ch == '(' { depth += 1; }
-                if ch == ')' { depth -= 1; }
-                if depth == 0 { break; }
-                cmd.push(ch);
-            }
-
-            let cmd = expand_subshells(cmd.trim(), aliases, env_vars);
-
-            let output = Command::new(std::env::current_exe().unwrap().as_os_str())
-                .arg("-c")
-                .arg(&cmd)
-                .output()
-                .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
-                .unwrap_or_else(|_| "".to_string());
-
-            result.push_str(&output);
-        } else {
-            result.push(c);
-        }
-    }
-
-    result
-}
-
-// ------------------ execution command line ------------------
-fn execute_command_line(line: &str, home: &Path, aliases: &HashMap<String,String>, env_vars: &HashMap<String,String>) {
-    let commands: Vec<String> = line.split('|').map(|s| s.trim().to_string()).collect();
-    let mut previous_process: Option<Child> = None;
-
-    for (i, cmd) in commands.iter().enumerate() {
-        let cmd_parts: Vec<String> = shell_words::split(cmd).unwrap_or_default();
-        if cmd_parts.is_empty() {
-            continue;
-        }
-        let cmd_name = &cmd_parts[0];
-        let mut args: Vec<String> = cmd_parts[1..].to_vec();
-
-        for arg in &mut args {
-            *arg = expand_subshells(arg, aliases, env_vars);
-            if arg.starts_with("~") {
-                *arg = arg.replacen("~", home.to_str().unwrap(), 1);
-            }
-        }
-
-        let mut expanded_args = Vec::new();
-        for arg in &args {
-            if arg.contains('*') {
-                for entry in glob(arg).unwrap().flatten() {
-                    expanded_args.push(entry.to_string_lossy().to_string());
-                }
-            } else {
-                expanded_args.push(arg.clone());
-            }
-        }
-        args = expanded_args;
-
-        let mut command = Command::new(cmd_name);
-        command.args(&args);
-
-        if let Some(prev) = previous_process {
-            command.stdin(prev.stdout.unwrap());
-        }
-        if i == commands.len() - 1 {
-            command.stdout(Stdio::inherit());
-        } else {
-            command.stdout(Stdio::piped());
-        }
-
-        let child = command.spawn();
-        match child {
-            Ok(c) => previous_process = Some(c),
-            Err(e) => {
-                eprintln!("anssh: {}", e);
-                previous_process = None;
-                break;
-            }
-        }
-    }
-
-    if let Some(mut last) = previous_process {
-        while let Ok(None) = last.try_wait() {
-            thread::sleep(std::time::Duration::from_millis(100));
-        }
-    }
 }
