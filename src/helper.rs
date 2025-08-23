@@ -75,30 +75,30 @@ impl Completer for AnsshHelper {
         let last = tokens.last().unwrap();
 
         for rule in &self.rules {
-            if rule.contains("$directory") {
+            if rule.contains("$directory") || rule.contains("$file") {
                 if let Ok(entries) = fs::read_dir(".") {
                     for e in entries.flatten() {
-                        if e.path().is_dir() {
-                            if let Some(name) = e.file_name().to_str() {
-                                matches.push(Pair {
-                                    display: name.to_string(),
-                                    replacement: name.to_string(),
-                                });
-                            }
+                        let name = match e.file_name().into_string() {
+                            Ok(n) => n,
+                            Err(_) => continue,
+                        };
+
+                        if self.ignore.contains(&name) {
+                            continue;
                         }
-                    }
-                }
-            }
-            if rule.contains("$file") {
-                if let Ok(entries) = fs::read_dir(".") {
-                    for e in entries.flatten() {
-                        if e.path().is_file() {
-                            if let Some(name) = e.file_name().to_str() {
-                                matches.push(Pair {
-                                    display: name.to_string(),
-                                    replacement: name.to_string(),
-                                });
-                            }
+
+                        if e.path().is_dir() && rule.contains("$directory") {
+                            matches.push(Pair {
+                                display: name.clone(),
+                                replacement: name.clone(),
+                            });
+                        }
+
+                        if e.path().is_file() && rule.contains("$file") {
+                            matches.push(Pair {
+                                display: name.clone(),
+                                replacement: name.clone(),
+                            });
                         }
                     }
                 }
