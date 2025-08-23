@@ -1,9 +1,9 @@
+use std::collections::HashMap;
 use owo_colors::OwoColorize;
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-// ------------------- Highlight args -------------------
 pub(crate) fn load_highlight_rules(path: &Path) -> Vec<(glob::Pattern, Arc<dyn Fn(&str) -> String + Send + Sync>)> {
     let mut rules = Vec::new();
     if let Ok(lines) = fs::read_to_string(path) {
@@ -31,8 +31,6 @@ pub(crate) fn load_highlight_rules(path: &Path) -> Vec<(glob::Pattern, Arc<dyn F
     }
     rules
 }
-
-// ------------------- Prompt -------------------
 pub(crate) fn parse_prompt_theme(template: &str, command: &str) -> String {
     let mut s = template.trim_end_matches('\n').to_string();
     let cwd = std::env::current_dir().unwrap_or_default().display().to_string();
@@ -107,10 +105,57 @@ pub(crate) fn parse_prompt_theme(template: &str, command: &str) -> String {
     result + "\x1b[0m"
 }
 
-// ------------------- Config Directory -------------------
-pub(crate) fn ensure_config_dir(home: &Path) {
-    let config_dir = home.join(".config/anssh");
-    if !config_dir.exists() {
-        fs::create_dir_all(&config_dir).expect("Failed to create config directory");
+pub(crate) fn read_rc(rc_path: PathBuf, env_vars: &mut HashMap<String, String>, aliases: &mut HashMap<String, String>) {
+    if let Ok(contents) = fs::read_to_string(rc_path) {
+        for line in contents.lines() {
+            let line = line.trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+
+            let line = line.strip_prefix("export ").unwrap_or(line).trim();
+
+            if let Some(eq_pos) = line.find('=') {
+                let (key, value) = line.split_at(eq_pos);
+                let key = key.trim();
+                let mut value = value[1..].trim();
+
+                if (value.starts_with('"') && value.ends_with('"'))
+                    || (value.starts_with('\'') && value.ends_with('\''))
+                {
+                    value = &value[1..value.len() - 1];
+                }
+
+                let mut expanded_value = String::new();
+                let mut chars = value.chars().peekable();
+                while let Some(c) = chars.next() {
+                    if c == '$' {
+                        let mut var_name = String::new();
+                        while let Some(&ch) = chars.peek() {
+                            if ch.is_alphanumeric() || ch == '_' {
+                                var_name.push(ch);
+                                chars.next();
+                            } else {
+                                break;
+                            }
+                        }
+                        if let Some(val) = env_vars.get(&var_name) {
+                            expanded_value.push_str(val);
+                        }
+                    } else {
+                        expanded_value.push(c);
+                    }
+                }
+
+                if key.starts_with("alias ") {
+                    if let Some(alias_name) = key.strip_prefix("alias ") {
+                        aliases.insert(alias_name.to_string(), expanded_value);
+                    }
+                } else {
+                    env_vars.insert(key.to_string(), expanded_value.clone());
+                    unsafe { std::env::set_var(key, expanded_value); }
+                }
+            }
+        }
     }
 }

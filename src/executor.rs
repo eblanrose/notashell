@@ -1,8 +1,9 @@
+use glob::glob;
 use std::collections::HashMap;
-use std::{fs, thread};
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
-use glob::glob;
+use std::{fs, thread};
+use crate::utilities;
 
 fn expand_subshells(arg: &str, aliases: &HashMap<String,String>, env_vars: &HashMap<String,String>) -> String {
     let mut result = String::new();
@@ -76,11 +77,10 @@ pub(crate) fn run_script(
     }
 }
 
-
-// ------------------ execution command line ------------------
 pub(crate) fn execute_command_line(line: &str, home: &Path, aliases: &HashMap<String,String>, env_vars: &HashMap<String,String>) {
     let commands: Vec<String> = line.split('|').map(|s| s.trim().to_string()).collect();
     let mut previous_process: Option<Child> = None;
+    let cwd = std::env::current_dir().unwrap_or_default().display().to_string();
 
     for (i, cmd) in commands.iter().enumerate() {
         let cmd_parts: Vec<String> = shell_words::split(cmd).unwrap_or_default();
@@ -92,9 +92,7 @@ pub(crate) fn execute_command_line(line: &str, home: &Path, aliases: &HashMap<St
 
         for arg in &mut args {
             *arg = expand_subshells(arg, aliases, env_vars);
-            if arg.starts_with("~") {
-                *arg = arg.replacen("~", home.to_str().unwrap(), 1);
-            }
+            *arg = utilities::expand_path(&*arg, &*cwd, home);
         }
 
         let mut expanded_args = Vec::new();
@@ -111,6 +109,7 @@ pub(crate) fn execute_command_line(line: &str, home: &Path, aliases: &HashMap<St
 
         let mut command = Command::new(cmd_name);
         command.args(&args);
+        command.envs(env_vars);
 
         if let Some(prev) = previous_process {
             command.stdin(prev.stdout.unwrap());

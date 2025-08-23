@@ -116,7 +116,8 @@ impl Completer for AnsshHelper {
             }
         }
 
-        Ok((0, matches))
+        let start = line.rfind(last).unwrap_or(0);
+        Ok((start, matches))
     }
 }
 
@@ -187,8 +188,60 @@ impl Highlighter for AnsshHelper {
 
 impl Hinter for AnsshHelper {
     type Hint = String;
-    fn hint(&self, _line: &str, _pos: usize, _ctx: &Context<'_>) -> Option<Self::Hint> {
-        None // No hinting needed for this shell
+
+    fn hint(&self, line: &str, _pos: usize, _ctx: &Context<'_>) -> Option<Self::Hint> {
+        let tokens: Vec<&str> = line.split_whitespace().collect();
+        if tokens.is_empty() { return None; }
+
+        let last = tokens.last().unwrap();
+        let mut candidates = Vec::new();
+
+        for rule in &self.rules {
+            if rule.contains("$file") || rule.contains("$directory") {
+                if let Ok(entries) = fs::read_dir(".") {
+                    for e in entries.flatten() {
+                        let name = match e.file_name().into_string() {
+                            Ok(n) => n,
+                            Err(_) => continue,
+                        };
+
+                        if self.ignore.contains(&name) {
+                            continue;
+                        }
+
+                        if e.path().is_dir() && rule.contains("$directory") && name.starts_with(last) {
+                            candidates.push(name.clone());
+                        }
+
+                        if e.path().is_file() && rule.contains("$file") && name.starts_with(last) {
+                            candidates.push(name.clone());
+                        }
+                    }
+                }
+            }
+        }
+
+        if candidates.is_empty() {
+            candidates.extend(
+                self.list_binaries()
+                    .into_iter()
+                    .filter(|b| !self.ignore.contains(b) && b.starts_with(last))
+            );
+        }
+
+        if candidates.is_empty() { return None; }
+
+        let mut prefix = candidates[0].clone();
+        for candidate in &candidates[1..] {
+            let mut i = 0;
+            while i < prefix.len() && i < candidate.len() && prefix.as_bytes()[i] == candidate.as_bytes()[i] {
+                i += 1;
+            }
+            prefix.truncate(i);
+        }
+
+        let hint = &prefix[last.len()..];
+        if hint.is_empty() { None } else { Some(hint.to_string()) }
     }
 }
 

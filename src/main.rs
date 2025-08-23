@@ -1,23 +1,55 @@
 mod helper;
 mod config;
 mod executor;
+mod utilities;
 
 use dirs::home_dir;
+use rustyline::config::Configurer;
 use rustyline::error::ReadlineError;
 use rustyline::{
     Editor, Result as RustyResult,
 };
 use signal_hook::consts::SIGINT;
 use std::collections::HashMap;
+use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
-use std::fs;
+fn print_version(if_colon: bool) {
+    if if_colon {
+        println!("anssh v{}:", env!("CARGO_PKG_VERSION"));
+    } else {
+        println!("anssh v{}", env!("CARGO_PKG_VERSION"));
+    }
+}
 
-// ------------------- Main -------------------
+fn print_help(if_out: bool) {
+    print_version(true);
+    if if_out {
+        println!("  Usage:");
+        println!("    anssh [Options]");
+        println!("  Options:");
+        println!("    -h, --help  Print help message");
+        println!("    -v, --version  Print version");
+        println!("    -nc, --norc  Not loading rc");
+    } else {
+        println!("  help  Print help message");
+        println!("  version  Print version");
+        println!("  exit [int]  Exit with code, default: 0");
+    }
+}
+
+
+// Main
 fn main() {
+    // flags
+    let mut norc = false;
+
+    // variables
     let home = home_dir().unwrap_or_else(|| PathBuf::from("."));
-    config::ensure_config_dir(&home);
+    let mut cwd = std::env::current_dir().unwrap_or_default().display().to_string();
+
+    utilities::ensure_config_dir(&home);
     let rc_path = home.join(".anssh_rc");
     let history_path = home.join(".anssh_history");
     let prompt_path = home.join(".config/anssh/prompt");
@@ -28,75 +60,39 @@ fn main() {
     let mut env_vars: HashMap<String, String> = std::env::vars().collect();
     let mut aliases: HashMap<String, String> = HashMap::new();
 
-    if let Ok(contents) = fs::read_to_string(rc_path) {
-        for line in contents.lines() {
-            let line = line.trim();
-            if line.is_empty() || line.starts_with('#') {
-                continue;
-            }
+    // checking for arguments like -c
+    let args: Vec<String> = std::env::args().collect();
+    if args.len() >= 3 && (args[1] == "-c" || args[1] == "--command") {
+        let command_line = args[2..].join(" ");
+        executor::execute_command_line(&command_line, &home, &aliases, &env_vars);
+        return;
+    } else if args.len() >= 2 && (args[1] == "-nc" || args[1] == "--norc") {
+        norc = true;
+    } else if args.len() >= 2 && (args[1] == "-v" || args[1] == "--version") {
+        print_version(false);
+        return;
+    } else if args.len() >= 2 && (args[1] == "-h" || args[1] == "--help") {
+        print_help(true);
+        return;
+    } else if args.len() >= 2 {
+        print_help(true);
+        return;
+    }
 
-            let line = line.strip_prefix("export ").unwrap_or(line).trim();
-
-            if let Some(eq_pos) = line.find('=') {
-                let (key, value) = line.split_at(eq_pos);
-                let key = key.trim();
-                let mut value = value[1..].trim();
-
-                if (value.starts_with('"') && value.ends_with('"'))
-                    || (value.starts_with('\'') && value.ends_with('\''))
-                {
-                    value = &value[1..value.len() - 1];
-                }
-
-                let mut expanded_value = String::new();
-                let mut chars = value.chars().peekable();
-                while let Some(c) = chars.next() {
-                    if c == '$' {
-                        let mut var_name = String::new();
-                        while let Some(&ch) = chars.peek() {
-                            if ch.is_alphanumeric() || ch == '_' {
-                                var_name.push(ch);
-                                chars.next();
-                            } else {
-                                break;
-                            }
-                        }
-                        if let Some(val) = env_vars.get(&var_name) {
-                            expanded_value.push_str(val);
-                        }
-                    } else {
-                        expanded_value.push(c);
-                    }
-                }
-
-                if key.starts_with("alias ") {
-                    if let Some(alias_name) = key.strip_prefix("alias ") {
-                        aliases.insert(alias_name.to_string(), expanded_value);
-                    }
-                } else {
-                    env_vars.insert(key.to_string(), expanded_value.clone());
-                    unsafe { std::env::set_var(key, expanded_value); }
-                }
-            }
-        }
+    if !norc {
+        config::read_rc(rc_path, &mut env_vars, &mut aliases);
     }
 
     let mut rl = Editor::new().expect("Failed to create Editor");
     rl.set_helper(Some(helper));
     let _ = rl.load_history(&history_path);
+    rl.set_auto_add_history(true);
+    rl.set_completion_type(rustyline::CompletionType::Circular);
 
-    // ------------------ checking for arguments like -c ------------------
-    let args: Vec<String> = std::env::args().collect();
-    if args.len() >= 3 && args[1] == "-c" {
-        let command_line = args[2..].join(" ");
-        executor::execute_command_line(&command_line, &home, &aliases, &env_vars);
-        return;
-    }
-
-    // ------------------ cycle ------------------
     let term = Arc::new(AtomicBool::new(false));
     signal_hook::flag::register(SIGINT, Arc::clone(&term)).expect("Failed to register SIGINT");
 
+    // cycle
     loop {
         owo_colors::set_override(true);
         let template = fs::read_to_string(&prompt_path).unwrap_or_else(|e| {
@@ -124,15 +120,23 @@ fn main() {
 
         rl.add_history_entry(input.clone()).expect("Failed to add history entry");
 
+        let mut parts = input.split_whitespace();
+        let first_word = parts.next().unwrap_or("");
 
-        if input.starts_with("exit") {
-            let parts: Vec<&str> = input.split_whitespace().collect();
-            let code = if parts.len() > 1 {
-                parts[1].parse::<i32>().unwrap_or(0)
-            } else {
-                0
-            };
-            std::process::exit(code);
+        match first_word {
+            "exit" => {
+                let code = parts.next().and_then(|s| s.parse::<i32>().ok()).unwrap_or(0);
+                std::process::exit(code);
+            },
+            "version" => {
+                print_version(false);
+                continue;
+            },
+            "help" => {
+                print_help(false);
+                continue;
+            },
+            _ => {}
         }
 
         for (k, v) in &env_vars {
@@ -149,7 +153,28 @@ fn main() {
             }
         }
 
-        let first_word = input.split_whitespace().next().unwrap_or("");
+        let mut parts = input.split_whitespace();
+        let first_word = parts.next().unwrap_or("");
+        let path = Path::new(first_word);
+        if first_word == "cd" {
+            let target = parts.next().unwrap_or(".");
+            let target_path = utilities::expand_path(target, &cwd, &home);
+            let path = Path::new(&target_path);
+            if let Err(e) = std::env::set_current_dir(path) {
+                eprintln!("anssh: cd: {}: {}", target, e);
+            } else {
+                cwd = std::env::current_dir().unwrap().to_str().unwrap().to_string();
+            }
+            continue;
+        }
+
+        if path.is_dir() {
+            if let Err(e) = std::env::set_current_dir(path) {
+                eprintln!("Failed to enter directory {}: {}", first_word, e);
+            }
+            continue;
+        }
+
         if first_word.ends_with(".anssh") && Path::new(first_word).is_file() {
             let mut parts = input.split_whitespace();
             let script_path = parts.next().unwrap();
