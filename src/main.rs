@@ -2,19 +2,20 @@ mod helper;
 mod config;
 mod executor;
 mod utilities;
+mod expansions;
 
 use dirs::home_dir;
 use rustyline::config::Configurer;
 use rustyline::error::ReadlineError;
-use rustyline::{
-    Editor, Result as RustyResult,
-};
+use rustyline::{Editor, Result as RustyResult};
 use signal_hook::consts::SIGINT;
 use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use executor::JobManager;
+
 fn print_version(if_colon: bool) {
     if if_colon {
         println!("anssh v{}:", env!("CARGO_PKG_VERSION"));
@@ -36,35 +37,159 @@ fn print_help(if_out: bool) {
         println!("  help  Print help message");
         println!("  version  Print version");
         println!("  exit [int]  Exit with code, default: 0");
+        println!("  jobs  List running jobs");
+        println!("  fg [job_id]  Bring job to foreground");
+        println!("  bg [job_id]  Send job to background");
+        println!("  cd [dir]  Change directory");
+        println!("  &  Execute command in background");
     }
 }
 
+fn handle_builtin(
+    first_word: &str,
+    parts: &mut std::str::SplitWhitespace<'_>,
+    job_manager: &JobManager,
+) -> Option<BuiltinResult> {
+    match first_word {
+        "exit" => {
+            let code = parts.next().and_then(|s| s.parse::<i32>().ok()).unwrap_or(0);
+            std::process::exit(code);
+        },
+        "version" => {
+            print_version(false);
+            return Some(BuiltinResult::Continue);
+        },
+        "help" => {
+            print_help(false);
+            return Some(BuiltinResult::Continue);
+        },
+        "jobs" => {
+            let jobs = job_manager.get_jobs();
+            if jobs.is_empty() {
+                println!("no jobs");
+            } else {
+                for job in jobs {
+                    match job.status {
+                        executor::JobStatus::Running => {
+                            let mark = if job.is_background { '+' } else { '-' };
+                            println!("[{}]{} Running: {}", job.id, mark, job.command);
+                        },
+                        executor::JobStatus::Stopped => {
+                            let mark = if job.is_background { '+' } else { '-' };
+                            println!("[{}]{} Stopped: {}", job.id, mark, job.command);
+                        },
+                        executor::JobStatus::Completed(_) => {
+                            println!("[{}] Done: {}", job.id, job.command);
+                        },
+                    }
+                }
+            }
+            return Some(BuiltinResult::Continue);
+        },
+        "fg" => {
+            if let Some(job_id) = parts.next().and_then(|s| s.parse::<usize>().ok()) {
+                if let Some(mut child) = job_manager.get_child(job_id) {
+                    job_manager.update_job_status(job_id, executor::JobStatus::Running);
+                    match child.wait() {
+                        Ok(status) => {
+                            job_manager.mark_completed(job_id, status);
+                        },
+                        Err(e) => {
+                            eprintln!("anssh: fg: wait failed: {}", e);
+                        }
+                    }
+                } else {
+                    eprintln!("anssh: fg: job {} has finished", job_id);
+                }
+            } else {
+                eprintln!("anssh: fg: job ID required");
+            }
+            return Some(BuiltinResult::Continue);
+        },
+        "bg" => {
+            if let Some(job_id) = parts.next().and_then(|s| s.parse::<usize>().ok()) {
+                if job_manager.send_to_background(job_id) {
+                    println!("[{}] {}", job_id, job_manager.get_job(job_id).map(|j| j.command).unwrap_or_default());
+                } else {
+                    eprintln!("anssh: bg: job {} is not stopped", job_id);
+                }
+            } else {
+                eprintln!("anssh: bg: job ID required");
+            }
+            return Some(BuiltinResult::Continue);
+        },
+        _ => None,
+    }
+}
 
-// Main
+enum BuiltinResult {
+    Continue,
+    Break,
+}
+
+fn expand_input(input: &str, env_vars: &HashMap<String, String>, aliases: &HashMap<String, String>) -> String {
+    let mut result = input.to_string();
+    
+    for (k, v) in env_vars {
+        result = result.replace(&format!("${}", k), v);
+    }
+    
+    if let Some(first_word) = result.split_whitespace().next() {
+        if let Some(alias_value) = aliases.get(first_word) {
+            let rest = result[first_word.len()..].trim().to_string();
+            result = if rest.is_empty() {
+                alias_value.clone()
+            } else {
+                format!("{} {}", alias_value, rest)
+            };
+        }
+    }
+    
+    result
+}
+
+fn handle_cd(target: &str, home: &Path, cwd: &str) -> Option<String> {
+    let target_path = utilities::expand_path(target, cwd, home);
+    let path = Path::new(&target_path);
+    if let Err(e) = std::env::set_current_dir(path) {
+        eprintln!("anssh: cd: {}: {}", target, e);
+        None
+    } else {
+        Some(std::env::current_dir().unwrap().display().to_string())
+    }
+}
+
 fn main() {
-    // flags
     let mut norc = false;
-
-    // variables
     let home = home_dir().unwrap_or_else(|| PathBuf::from("."));
     let mut cwd = std::env::current_dir().unwrap_or_default().display().to_string();
+    let job_manager = Arc::new(JobManager::new());
 
-    utilities::ensure_config_dir(&home);
     let rc_path = home.join(".anssh_rc");
     let history_path = home.join(".anssh_history");
     let prompt_path = home.join(".config/anssh/prompt");
     let complete_path = home.join(".config/anssh/complete");
     let highlight_path = home.join(".config/anssh/highlight_rules");
 
-    let helper = helper::AnsshHelper::new(&complete_path, &highlight_path);
+    utilities::ensure_config_dir(&home);
+
     let mut env_vars: HashMap<String, String> = std::env::vars().collect();
     let mut aliases: HashMap<String, String> = HashMap::new();
 
-    // checking for arguments like -c
     let args: Vec<String> = std::env::args().collect();
     if args.len() >= 3 && (args[1] == "-c" || args[1] == "--command") {
-        let command_line = args[2..].join(" ");
-        executor::execute_command_line(&command_line, &home, &aliases, &env_vars);
+        let mut command_line = args[2..].join(" ");
+        let is_bg = command_line.trim().ends_with('&');
+        if is_bg {
+            command_line = command_line.trim_end_matches('&').trim().to_string();
+        }
+        let expanded = expand_input(&command_line, &env_vars, &aliases);
+        let jm = job_manager.clone();
+        executor::execute_command_line(&expanded, &home, &aliases, &env_vars, Some(&jm));
+        if is_bg {
+            let job_id = job_manager.add_job(expanded.clone(), None, true);
+            println!("[{}] {}", job_id, expanded);
+        }
         return;
     } else if args.len() >= 2 && (args[1] == "-nc" || args[1] == "--norc") {
         norc = true;
@@ -84,6 +209,7 @@ fn main() {
     }
 
     let mut rl = Editor::new().expect("Failed to create Editor");
+    let helper = helper::AnsshHelper::new(&complete_path, &highlight_path);
     rl.set_helper(Some(helper));
     let _ = rl.load_history(&history_path);
     rl.set_auto_add_history(true);
@@ -92,14 +218,13 @@ fn main() {
     let term = Arc::new(AtomicBool::new(false));
     signal_hook::flag::register(SIGINT, Arc::clone(&term)).expect("Failed to register SIGINT");
 
-    // cycle
     loop {
         owo_colors::set_override(true);
         let template = fs::read_to_string(&prompt_path).unwrap_or_else(|e| {
             eprintln!("Warning: Failed to read prompt file: {}", e);
             "anssh> ".to_string()
         });
-        let prompt_str = config::parse_prompt_theme(&template, "");
+        let prompt_str = config::parse_prompt_theme(&template, &cwd);
 
         term.store(false, Ordering::Relaxed);
 
@@ -118,72 +243,66 @@ fn main() {
             continue;
         }
 
-        rl.add_history_entry(input.clone()).expect("Failed to add history entry");
-
         let mut parts = input.split_whitespace();
         let first_word = parts.next().unwrap_or("");
 
-        match first_word {
-            "exit" => {
-                let code = parts.next().and_then(|s| s.parse::<i32>().ok()).unwrap_or(0);
-                std::process::exit(code);
-            },
-            "version" => {
-                print_version(false);
-                continue;
-            },
-            "help" => {
-                print_help(false);
-                continue;
-            },
-            _ => {}
-        }
-
-        for (k, v) in &env_vars {
-            input = input.replace(&format!("${}", k), v);
-        }
-        if let Some(first_word) = input.split_whitespace().next() {
-            if let Some(alias_value) = aliases.get(first_word) {
-                let rest: String = input[first_word.len()..].trim().to_string();
-                input = if rest.is_empty() {
-                    alias_value.clone()
-                } else {
-                    format!("{} {}", alias_value, rest)
-                };
+        if let Some(result) = handle_builtin(first_word, &mut input.split_whitespace(), &job_manager) {
+            match result {
+                BuiltinResult::Continue => continue,
+                BuiltinResult::Break => break,
             }
         }
 
-        let mut parts = input.split_whitespace();
-        let first_word = parts.next().unwrap_or("");
-        let path = Path::new(first_word);
         if first_word == "cd" {
-            let target = parts.next().unwrap_or(".");
-            let target_path = utilities::expand_path(target, &cwd, &home);
-            let path = Path::new(&target_path);
-            if let Err(e) = std::env::set_current_dir(path) {
-                eprintln!("anssh: cd: {}: {}", target, e);
-            } else {
-                cwd = std::env::current_dir().unwrap().to_str().unwrap().to_string();
+            let target = input.split_whitespace().nth(1).unwrap_or("~");
+            if let Some(new_cwd) = handle_cd(target, &home, &cwd) {
+                cwd = new_cwd;
             }
             continue;
         }
 
-        if path.is_dir() {
-            if let Err(e) = std::env::set_current_dir(path) {
-                eprintln!("Failed to enter directory {}: {}", first_word, e);
-            }
-            continue;
-        }
+        let expanded = expand_input(&input, &env_vars, &aliases);
+        let mut expanded_parts = expanded.split_whitespace();
+        let expanded_first = expanded_parts.next().unwrap_or("");
 
-        if first_word.ends_with(".anssh") && Path::new(first_word).is_file() {
-            let mut parts = input.split_whitespace();
+        if expanded_first.ends_with(".anssh") && Path::new(expanded_first).is_file() {
+            let mut parts = expanded.split_whitespace();
             let script_path = parts.next().unwrap();
             let args: Vec<String> = parts.map(|s| s.to_string()).collect();
             executor::run_script(Path::new(script_path), &home, &aliases, &env_vars, &args);
             continue;
         }
 
-        executor::execute_command_line(&input, &home, &aliases, &env_vars);
+        if Path::new(expanded_first).is_dir() {
+            let _ = handle_cd(expanded_first, &home, &cwd);
+            continue;
+        }
+
+        let is_background = expanded.trim().ends_with('&');
+        let final_input = if is_background {
+            expanded.trim_end_matches('&').trim().to_string()
+        } else {
+            expanded.clone()
+        };
+
+        rl.add_history_entry(final_input.clone()).expect("Failed to add history entry");
+
+        if is_background {
+            let job_id = job_manager.add_job(final_input.clone(), None, true);
+            println!("[{}] {}", job_id, final_input);
+            
+            let home_clone = home.clone();
+            let aliases_clone = aliases.clone();
+            let env_vars_clone = env_vars.clone();
+            let input_clone = final_input.clone();
+            let jm = job_manager.clone();
+            
+            std::thread::spawn(move || {
+                executor::execute_command_line(&input_clone, &home_clone, &aliases_clone, &env_vars_clone, Some(&jm));
+            });
+        } else {
+            executor::execute_command_line(&final_input, &home, &aliases, &env_vars, Some(&job_manager));
+        }
     }
 
     let _ = rl.save_history(&history_path);

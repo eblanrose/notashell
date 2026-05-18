@@ -11,7 +11,7 @@ pub(crate) fn ensure_config_dir(home: &Path) {
 pub(crate) fn expand_path(arg: &str, cwd: &str, home: &Path) -> String {
     let mut path_str = arg.to_string();
     if path_str.starts_with("~") {
-        path_str = path_str.replacen("~", home.to_str().unwrap(), 1);
+        path_str = crate::expansions::expand_tilde(&path_str, home);
     }
     let path = Path::new(&path_str);
     if path.is_absolute() || path.exists() {
