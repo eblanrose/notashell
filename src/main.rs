@@ -3,18 +3,21 @@ mod config;
 mod executor;
 mod utilities;
 mod expansions;
+mod themes;
+mod plugins;
 
 use dirs::home_dir;
-use rustyline::config::Configurer;
-use rustyline::error::ReadlineError;
-use rustyline::{Editor, Result as RustyResult};
-use signal_hook::consts::SIGINT;
-use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::collections::HashMap;
+use rustyline::config::Configurer;
+use rustyline::error::ReadlineError;
+use rustyline::{Editor, Result as RustyResult};
+use signal_hook::consts::SIGINT;
 use executor::JobManager;
+use themes::{ThemeManager, ProfileManager};
 
 fn print_version(if_colon: bool) {
     if if_colon {
@@ -33,6 +36,8 @@ fn print_help(if_out: bool) {
         println!("    -h, --help  Print help message");
         println!("    -v, --version  Print version");
         println!("    -nc, --norc  Not loading rc");
+        println!("    -t, --theme <name>  Set theme");
+        println!("    -p, --profile <name>  Load profile");
     } else {
         println!("  help  Print help message");
         println!("  version  Print version");
@@ -42,17 +47,23 @@ fn print_help(if_out: bool) {
         println!("  bg [job_id]  Send job to background");
         println!("  cd [dir]  Change directory");
         println!("  &  Execute command in background");
+        println!("  theme [name]  Show or set theme");
+        println!("  profile [name]  Show or switch profile");
+        println!("  plugins  List loaded plugins");
     }
 }
 
 fn handle_builtin(
     first_word: &str,
-    parts: &mut std::str::SplitWhitespace<'_>,
+    input: &str,
     job_manager: &JobManager,
+    theme_manager: &mut ThemeManager,
+    profile_manager: &mut ProfileManager,
+    plugin_manager: &plugins::PluginManager,
 ) -> Option<BuiltinResult> {
     match first_word {
         "exit" => {
-            let code = parts.next().and_then(|s| s.parse::<i32>().ok()).unwrap_or(0);
+            let code = input.split_whitespace().nth(1).and_then(|s| s.parse::<i32>().ok()).unwrap_or(0);
             std::process::exit(code);
         },
         "version" => {
@@ -87,7 +98,7 @@ fn handle_builtin(
             return Some(BuiltinResult::Continue);
         },
         "fg" => {
-            if let Some(job_id) = parts.next().and_then(|s| s.parse::<usize>().ok()) {
+            if let Some(job_id) = input.split_whitespace().nth(1).and_then(|s| s.parse::<usize>().ok()) {
                 if let Some(mut child) = job_manager.get_child(job_id) {
                     job_manager.update_job_status(job_id, executor::JobStatus::Running);
                     match child.wait() {
@@ -107,7 +118,7 @@ fn handle_builtin(
             return Some(BuiltinResult::Continue);
         },
         "bg" => {
-            if let Some(job_id) = parts.next().and_then(|s| s.parse::<usize>().ok()) {
+            if let Some(job_id) = input.split_whitespace().nth(1).and_then(|s| s.parse::<usize>().ok()) {
                 if job_manager.send_to_background(job_id) {
                     println!("[{}] {}", job_id, job_manager.get_job(job_id).map(|j| j.command).unwrap_or_default());
                 } else {
@@ -115,6 +126,44 @@ fn handle_builtin(
                 }
             } else {
                 eprintln!("anssh: bg: job ID required");
+            }
+            return Some(BuiltinResult::Continue);
+        },
+        "theme" => {
+            if let Some(theme_name) = input.split_whitespace().nth(1) {
+                if theme_manager.set_theme(theme_name) {
+                    println!("Theme set to: {}", theme_name);
+                } else {
+                    eprintln!("anssh: theme '{}' not found", theme_name);
+                    println!("Available themes: {}", theme_manager.list_themes().join(", "));
+                }
+            } else {
+                println!("Current theme: {}", theme_manager.current().name);
+            }
+            return Some(BuiltinResult::Continue);
+        },
+        "profile" => {
+            if let Some(profile_name) = input.split_whitespace().nth(1) {
+                if profile_manager.set_active(profile_name) {
+                    println!("Profile set to: {}", profile_name);
+                } else {
+                    eprintln!("anssh: profile '{}' not found", profile_name);
+                    println!("Available profiles: {}", profile_manager.list_profiles().join(", "));
+                }
+            } else {
+                println!("Current profile: {}", profile_manager.active().name);
+            }
+            return Some(BuiltinResult::Continue);
+        },
+        "plugins" => {
+            let plugins_list = plugin_manager.list_plugins();
+            if plugins_list.is_empty() {
+                println!("No plugins loaded");
+            } else {
+                println!("Loaded plugins:");
+                for plugin in plugins_list {
+                    println!("  {} (v{}) - {}", plugin.name, plugin.version, plugin.description);
+                }
             }
             return Some(BuiltinResult::Continue);
         },
@@ -161,9 +210,16 @@ fn handle_cd(target: &str, home: &Path, cwd: &str) -> Option<String> {
 
 fn main() {
     let mut norc = false;
-    let home = home_dir().unwrap_or_else(|| PathBuf::from("."));
+    let mut initial_theme = None;
+    let mut initial_profile = None;
+    
+    let home = dirs::home_dir().unwrap_or_else(|| PathBuf::from("."));
     let mut cwd = std::env::current_dir().unwrap_or_default().display().to_string();
     let job_manager = Arc::new(JobManager::new());
+    
+    let mut theme_manager = ThemeManager::new(&home);
+    let mut profile_manager = ProfileManager::new(&home);
+    let plugin_manager = plugins::PluginManager::new(&home);
 
     let rc_path = home.join(".anssh_rc");
     let history_path = home.join(".anssh_history");
@@ -172,6 +228,29 @@ fn main() {
     let highlight_path = home.join(".config/anssh/highlight_rules");
 
     utilities::ensure_config_dir(&home);
+
+    if !prompt_path.exists() {
+        if let Some(parent) = prompt_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let default_prompt = "{user}@{host}:{cwd}$ ";
+        let _ = fs::write(&prompt_path, default_prompt);
+    }
+    
+    if !complete_path.exists() {
+        if let Some(parent) = complete_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let _ = fs::write(&complete_path, "");
+    }
+    
+    if !highlight_path.exists() {
+        if let Some(parent) = highlight_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let default_highlight = "*.rs:$green\n*.md:$yellow\n";
+        let _ = fs::write(&highlight_path, default_highlight);
+    }
 
     let mut env_vars: HashMap<String, String> = std::env::vars().collect();
     let mut aliases: HashMap<String, String> = HashMap::new();
@@ -184,13 +263,23 @@ fn main() {
             command_line = command_line.trim_end_matches('&').trim().to_string();
         }
         let expanded = expand_input(&command_line, &env_vars, &aliases);
+        
+        let first_word = expanded.split_whitespace().next().unwrap_or("");
+        
+        if let Some(result) = handle_builtin(&first_word, &expanded, &job_manager, &mut theme_manager, &mut profile_manager, &plugin_manager) {
+            match result {
+                BuiltinResult::Continue => return,
+                BuiltinResult::Break => return,
+            }
+        }
+        
         let jm = job_manager.clone();
         executor::execute_command_line(&expanded, &home, &aliases, &env_vars, Some(&jm));
-        if is_bg {
-            let job_id = job_manager.add_job(expanded.clone(), None, true);
-            println!("[{}] {}", job_id, expanded);
-        }
         return;
+    } else if args.len() >= 3 && (args[1] == "-t" || args[1] == "--theme") {
+        initial_theme = Some(args[2].clone());
+    } else if args.len() >= 3 && (args[1] == "-p" || args[1] == "--profile") {
+        initial_profile = Some(args[2].clone());
     } else if args.len() >= 2 && (args[1] == "-nc" || args[1] == "--norc") {
         norc = true;
     } else if args.len() >= 2 && (args[1] == "-v" || args[1] == "--version") {
@@ -208,6 +297,14 @@ fn main() {
         config::read_rc(rc_path, &mut env_vars, &mut aliases);
     }
 
+    if let Some(theme_name) = initial_theme {
+        theme_manager.set_theme(&theme_name);
+    }
+    
+    if let Some(profile_name) = initial_profile {
+        profile_manager.set_active(&profile_name);
+    }
+    
     let mut rl = Editor::new().expect("Failed to create Editor");
     let helper = helper::AnsshHelper::new(&complete_path, &highlight_path);
     rl.set_helper(Some(helper));
@@ -219,17 +316,40 @@ fn main() {
     signal_hook::flag::register(SIGINT, Arc::clone(&term)).expect("Failed to register SIGINT");
 
     loop {
-        owo_colors::set_override(true);
-        let template = fs::read_to_string(&prompt_path).unwrap_or_else(|e| {
-            eprintln!("Warning: Failed to read prompt file: {}", e);
+        let template = fs::read_to_string(&prompt_path).unwrap_or_else(|_| {
             "anssh> ".to_string()
         });
-        let prompt_str = config::parse_prompt_theme(&template, &cwd);
+        
+        let current_cwd = std::env::current_dir().unwrap_or_default().display().to_string();
+        let user = std::env::var("USER").unwrap_or_else(|_| "user".to_string());
+        let host = hostname::get()
+            .unwrap_or_default()
+            .to_string_lossy()
+            .to_string();
+        
+        let mut prompt = template.replace("{user}", &user);
+        prompt = prompt.replace("{cwd}", &current_cwd);
+        prompt = prompt.replace("{host}", &host);
+        
+        prompt = prompt.replace("$blue", "\x1b[34m");
+        prompt = prompt.replace("$green", "\x1b[32m");
+        prompt = prompt.replace("$red", "\x1b[31m");
+        prompt = prompt.replace("$yellow", "\x1b[33m");
+        prompt = prompt.replace("$cyan", "\x1b[36m");
+        prompt = prompt.replace("$pink", "\x1b[38;5;205m");
+        prompt = prompt.replace("$orange", "\x1b[38;5;214m");
+        prompt = prompt.replace("$purple", "\x1b[35m");
+        prompt = prompt.replace("$clear", "\x1b[0m");
+        prompt = prompt.replace("$white", "\x1b[37m");
+        prompt = prompt.replace("$gray", "\x1b[90m");
+        
+        let prompt_str = prompt.to_string();
 
         term.store(false, Ordering::Relaxed);
 
         let readline = rl.readline(&prompt_str);
-        let mut input = match readline {
+        
+        let input = match readline {
             Ok(line) => line.trim().to_string(),
             Err(ReadlineError::Interrupted) => continue,
             Err(ReadlineError::Eof) => break,
@@ -243,10 +363,9 @@ fn main() {
             continue;
         }
 
-        let mut parts = input.split_whitespace();
-        let first_word = parts.next().unwrap_or("");
+        let first_word = input.split_whitespace().next().unwrap_or("");
 
-        if let Some(result) = handle_builtin(first_word, &mut input.split_whitespace(), &job_manager) {
+        if let Some(result) = handle_builtin(&first_word, &input, &job_manager, &mut theme_manager, &mut profile_manager, &plugin_manager) {
             match result {
                 BuiltinResult::Continue => continue,
                 BuiltinResult::Break => break,
@@ -262,10 +381,8 @@ fn main() {
         }
 
         let expanded = expand_input(&input, &env_vars, &aliases);
-        let mut expanded_parts = expanded.split_whitespace();
-        let expanded_first = expanded_parts.next().unwrap_or("");
 
-        if expanded_first.ends_with(".anssh") && Path::new(expanded_first).is_file() {
+        if expanded.ends_with(".anssh") && Path::new(&expanded).is_file() {
             let mut parts = expanded.split_whitespace();
             let script_path = parts.next().unwrap();
             let args: Vec<String> = parts.map(|s| s.to_string()).collect();
@@ -273,8 +390,8 @@ fn main() {
             continue;
         }
 
-        if Path::new(expanded_first).is_dir() {
-            let _ = handle_cd(expanded_first, &home, &cwd);
+        if Path::new(&expanded).is_dir() {
+            let _ = handle_cd(&expanded, &home, &cwd);
             continue;
         }
 
@@ -303,6 +420,8 @@ fn main() {
         } else {
             executor::execute_command_line(&final_input, &home, &aliases, &env_vars, Some(&job_manager));
         }
+        use std::io::Write;
+        let _ = std::io::stdout().flush();
     }
 
     let _ = rl.save_history(&history_path);

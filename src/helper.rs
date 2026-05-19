@@ -1,5 +1,4 @@
 use crate::{config, RustyResult};
-use owo_colors::OwoColorize;
 use rustyline::completion::{Completer, Pair};
 use rustyline::highlight::Highlighter;
 use rustyline::hint::Hinter;
@@ -131,9 +130,13 @@ impl Highlighter for AnsshHelper {
                 let token = &line[last_pos..i];
                 if !token.is_empty() {
                     if token == "|" || token == ">" || token == "<" {
-                        output.push_str(&token.blue().to_string());
+                        output.push_str("\x1b[34m");
+                        output.push_str(token);
+                        output.push_str("\x1b[0m");
                     } else if token.starts_with('-') {
-                        output.push_str(&token.yellow().to_string());
+                        output.push_str("\x1b[33m");
+                        output.push_str(token);
+                        output.push_str("\x1b[0m");
                     } else {
                         let mut highlighted = false;
                         for (pattern, func) in &self.highlight_rules {
@@ -156,9 +159,13 @@ impl Highlighter for AnsshHelper {
         if last_pos < line.len() {
             let token = &line[last_pos..];
             if token == "|" || token == ">" || token == "<" {
-                output.push_str(&token.blue().to_string());
+                output.push_str("\x1b[34m");
+                output.push_str(token);
+                output.push_str("\x1b[0m");
             } else if token.starts_with('-') {
-                output.push_str(&token.yellow().to_string());
+                output.push_str("\x1b[33m");
+                output.push_str(token);
+                output.push_str("\x1b[0m");
             } else {
                 let mut highlighted = false;
                 for (pattern, func) in &self.highlight_rules {

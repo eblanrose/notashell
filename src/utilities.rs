@@ -6,6 +6,21 @@ pub(crate) fn ensure_config_dir(home: &Path) {
     if !config_dir.exists() {
         fs::create_dir_all(&config_dir).expect("Failed to create config directory");
     }
+    
+    let themes_dir = home.join(".config/anssh/themes");
+    if !themes_dir.exists() {
+        let _ = fs::create_dir_all(&themes_dir);
+    }
+    
+    let profiles_dir = home.join(".config/anssh/profiles");
+    if !profiles_dir.exists() {
+        let _ = fs::create_dir_all(&profiles_dir);
+    }
+    
+    let plugins_dir = home.join(".config/anssh/plugins");
+    if !plugins_dir.exists() {
+        let _ = fs::create_dir_all(&plugins_dir);
+    }
 }
 
 pub(crate) fn expand_path(arg: &str, cwd: &str, home: &Path) -> String {

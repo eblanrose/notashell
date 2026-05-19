@@ -304,7 +304,7 @@ pub fn execute_command_line(
             } else {
                 eprintln!("anssh: cannot open append file: {}", append_file);
             }
-        } else if i == commands.len() - 1 && current_job_id.is_none() {
+        } else if i == commands.len() - 1 {
             command.stdout(Stdio::inherit());
         } else {
             command.stdout(Stdio::piped());
@@ -322,13 +322,15 @@ let child = command.spawn();
         match child {
             Ok(c) => {
                 let is_bg = i == commands.len() - 1 && previous_process.is_none() && current_job_id.is_none();
-                if let Some(jm) = job_manager {
-                    let id = jm.add_job(line.to_string(), None, is_bg);
-                    current_job_id = Some(id);
-                }
-                match is_bg {
-                    true => {},
-                    false => { previous_process = Some(c); }
+                if is_bg {
+                    if let Some(jm) = job_manager {
+                        let id = jm.add_job(line.to_string(), None, true);
+                        let mut children = CHILDREN.lock().unwrap();
+                        children.insert(id, c);
+                        current_job_id = Some(id);
+                    }
+                } else {
+                    previous_process = Some(c);
                 }
             },
             Err(e) => {
@@ -350,6 +352,15 @@ let child = command.spawn();
                     if let Some(jid) = current_job_id {
                         job_manager.unwrap().update_job_status(jid, JobStatus::Completed(status));
                     }
+                }
+            }
+        }
+    } else if let Some(jid) = current_job_id {
+        if let Some(jm) = job_manager {
+            let mut children = CHILDREN.lock().unwrap();
+            if let Some(mut child) = children.remove(&jid) {
+                if let Ok(status) = child.wait() {
+                    jm.update_job_status(jid, JobStatus::Completed(status));
                 }
             }
         }
