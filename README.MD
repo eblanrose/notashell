@@ -1,111 +1,76 @@
-# ansSH
+# ansSH-fork (или твое название)
 
-![Build Status](https://img.shields.io/badge/build-passing-brightgreen)
-![Rust Version](https://img.shields.io/badge/rust-1.80+-blue)
-![License](https://img.shields.io/badge/license-MIT-lightgrey)
+[![Rust Version](https://shields.io)](https://rust-lang.org)
+[![License: MIT](https://shields.io)](https://opensource.org)
 
-`ansSH` is a custom shell written in Rust, inspired by `sh` and `bash`. It supports aliases, history, autocompletion, glob patterns, syntax highlighting, and recursive `$()` commands.
+Это форк кастомной командной оболочки **ansSH** (оригинал от [akaruinekooff](https://github.com/akaruinekooff/ansSH)), написанной на Rust. Оригинальный проект был хорош, но мне захотелось допилить его под себя, исправить то, что отваливалось, и превратить эту затею в рабочую альтернативу `sh`/`bash`.
 
----
+## 🚀 Что это такое?
 
-## Features
+Это легковесный, быстрый и расширяемый Shell на Rust, который не пытается быть огромным комбайном вроде `zsh`, но умеет всё самое необходимое для комфортной работы в терминале прямо из коробки.
 
-- Support for command pipelines (`|`)
-- Autocompletion for files, directories, and binaries
-- Syntax highlighting based on configurable rules
-- Aliases and environment variables
-- Expansion of `~` to the home directory
-- Glob pattern (`*`) expansion
-- Recursive `$()` command substitution
-- Persistent command history
+## ✨ Основные фичи (унаследованные и допиленные)
 
----
+*   **Конвейеры (Pipelines):** Полноценная поддержка пайпов (`|`) для передачи вывода между командами.
+*   **Умное автодополнение:** Tab-комплит для бинарников, системных файлов и директорий.
+*   **Кастомная подсветка:** Настраиваемый синтаксис прямо через конфиги.
+*   **Алиасы и окружение:** Поддержка переменных среды и сокращений (ведь писать `git push` руками — лень).
+*   **Магия символов:** Автоматическое раскрытие тильды (`~`) до домашней папки и поддержка масок (`*`).
+*   **Рекурсивный подстановщик:** Выполнение вложенных команд через `$()`.
+*   **История:** Сохранение истории команд между сессиями (теперь не забудешь, что вводил вчера).
 
-## Installation
+## 🛠️ Установка и сборка
 
-Build using Cargo:
+Для сборки тебе понадобится установленный Rust и Cargo.
 
 ```bash
-git clone https://github.com/akaruinekooff/ansSH.git
+# Клонируй этот форк
+git clone https://github.com
 cd ansSH
+
+# Собери релизную версию
 cargo build --release
-````
+```
 
-The binary will be located at `target/release/ansSH`.
+Бинарник появится по пути: `target/release/ansSH`. 
 
----
-
-## Usage
-
-Start the shell:
-
+Если хочешь запустить сразу, пиши:
 ```bash
 ./target/release/ansSH
 ```
 
-Examples:
+## ⚙️ Настройка под себя
 
+Вся конфигурация подтягивается из твоей домашней директории. Если файлов нет — просто создай их.
+
+### 1. Переменные и алиасы (`~/.anssh_rc`)
 ```bash
-anssh> echo $(nproc)
-12
-anssh> ga .
-anssh> gc "added new features"
-anssh> gp
-```
+EDITOR="nvim"
+HI="Приветики!"
 
----
-
-## Configuration
-
-Configuration files are located in `~/.config/anssh` and `~/.anssh_rc`.
-
-### `~/.anssh_rc` (aliases and environment variables)
-
-```bash
-# Environment variables
-EDITOR="ansIDE"
-HI="Hello, world!"
-
-# Aliases
 alias ga="git add"
 alias gc="git commit -m"
 alias gp="git push"
 ```
 
-### `~/.config/anssh/complete` (autocompletion rules)
-
+### 2. Внешний вид приглашения (`~/.config/anssh/prompt`)
+Сделай свой терминал красивым. Доступные цвета: `$blue`, `$green`, `$red`, `$yellow`, `$cyan`, `$white` и `$clear` для сброса.
 ```text
-# Complete directories
-$directory
-
-# Complete files
-$file
-
-# Ignore binaries
-!ls
-!cat
+$green{user}$clear в $blue{cwd}$clear > 
 ```
 
-### `~/.config/anssh/highlight_rules` (syntax highlighting)
-
+### 3. Правила подсветки (`~/.config/anssh/highlight_rules`)
 ```text
 *.rs:green
 *.sh:blue
 *.toml:yellow
+*.md:cyan
 ```
 
-### `~/.config/anssh/prompt` (prompt customization)
+## ⚠️ Дисклеймер
 
-```text
-$green{user}$clear:$blue{cwd}$clear >
-```
+Форк находится в состоянии «работает на моей машине». Если у тебя что-то взорвалось, упало в панику (panic) или консоль начала вести себя странно — смело открывай Issue или пили Pull Request. 
 
-You can use `$blue`, `$green`, `$red`, `$yellow`, `$cyan`, `$white`, and `$clear` to add colors to your prompt.
+## 📝 Лицензия
 
-(I haven’t tested these configurations, so if any issues appear, please open an issue)
-
----
-
-## License
-
-MIT License © AkaruiNeko
+Этот проект распространяется под лицензией MIT. Делай с ним всё, что хочешь.
